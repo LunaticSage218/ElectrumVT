@@ -1,0 +1,9 @@
+BER = 0
+size = 256
+D = 16
+d = 2**D
+alpha = 23
+beta = 73
+P = 8
+gamma0 = 6
+g = gamma0 - 1

@@ -1,0 +1,5 @@
+1. They are asked if they want to enroll
+2. If yes, they enroll the virtual token, if no, continue
+3. Then, on the next page, it does the retrieval process
+4. On the same page, instead of generating the key, we ask for usb path and click to generate the key used to encrypt the seed phrase. 
+5. Once the seed phrase is encrypted, store it on the usb, may have other storage options. 
