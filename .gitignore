@@ -55,16 +55,10 @@ contrib/osx/*.dylib
 # env
 electrum-venv
 
-# oracle stuff
-electrum/gui/qt/wizard/virtual_token_utils/instantclient-basic-linux.x64-23.26.1.0.0
-electrum/gui/qt/wizard/virtual_token_utils/Wallet_ElectrumVirtualTokenDatabase
-
-# local db
-electrum/gui/qt/wizard/virtual_token_utils/enrollments.db
-
 # uploads
 uploads/
 
 # token files
 electrum/gui/qt/wizard/virtual_token_utils/token.json
-electrum/gui/qt/wizard/virtual_token_utils/credentials.json
+credentials.json
+token.json

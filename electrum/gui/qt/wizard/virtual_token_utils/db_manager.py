@@ -4,9 +4,7 @@ from typing import List, Union
 from bitarray import bitarray
 import os
 
-# --- CONFIGURATION ---
-db_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(db_dir, "enrollments.db")
+from electrum.gui.qt.wizard.virtual_token_utils.paths import DB_PATH
 
 
 class SQLiteDBManager:

@@ -11,10 +11,9 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+from electrum.gui.qt.wizard.virtual_token_utils.paths import CREDENTIALS_PATH, TOKEN_PATH
 
-# Base directory for dynamic paths (directory where this script lives)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 
 @contextmanager
@@ -41,9 +40,9 @@ def authenticate_with_google(credentials_path: Optional[str] = None,
     Authenticate with Google Drive and return a Credentials object.
     """
     if credentials_path is None:
-        credentials_path = os.path.join(BASE_DIR, "credentials.json")
+        credentials_path = CREDENTIALS_PATH
     if token_path is None:
-        token_path = os.path.join(BASE_DIR, "token.json")
+        token_path = TOKEN_PATH
 
     creds = None
     if os.path.exists(token_path):
@@ -129,9 +128,11 @@ def download_google_drive(file_link_path: Optional[str] = None,
     Returns a BytesIO containing the file content.
     """
     if file_link_path is None:
-        file_link_path = os.path.join(BASE_DIR, "google_link.txt")
+        from electrum.gui.qt.wizard.virtual_token_utils.paths import VT_DATA_DIR
+        file_link_path = os.path.join(str(VT_DATA_DIR), "google_link.txt")
     if download_dir is None:
-        download_dir = os.path.join(BASE_DIR, "downloads")
+        from electrum.gui.qt.wizard.virtual_token_utils.paths import VT_DATA_DIR
+        download_dir = os.path.join(str(VT_DATA_DIR), "downloads")
     os.makedirs(download_dir, exist_ok=True)
 
     with open(file_link_path, 'r') as f:

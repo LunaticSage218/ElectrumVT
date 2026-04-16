@@ -75,3 +75,12 @@ def get_seed_filename(user_id: str, password: str) -> str:
     """
     user_hash = compute_user_hash(user_id, password)
     return f"{user_hash}_seed.enc"
+
+
+def get_seed_nonces_filename(user_id: str, password: str) -> str:
+    """
+    Generate filename for the RN1/RN2 nonces used in seed key derivation.
+    Format: <hash>_seed_nonces.bin
+    """
+    user_hash = compute_user_hash(user_id, password)
+    return f"{user_hash}_seed_nonces.bin"

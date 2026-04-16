@@ -11,7 +11,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from electrum.gui.qt.wizard.virtual_token_utils.enrollment_protocol import enrollment_protocol
 
 from electrum.gui.qt.wizard.virtual_token_utils.utils import secure_filename
-from electrum.gui.qt.wizard.virtual_token_utils.paths import UPLOAD_DIR
 
 class EnrollmentWorker(QObject):
     progress = pyqtSignal(str, str)  
@@ -33,12 +32,8 @@ class EnrollmentWorker(QObject):
     def run(self):
         try:
             filename = secure_filename(self.src_path.name)
-            dst = UPLOAD_DIR / filename
-            if dst.resolve() != self.src_path.resolve():
-                shutil.copy2(self.src_path, dst)
-
-            ext = dst.suffix
-            filepath = str(dst)
+            ext = self.src_path.suffix
+            filepath = str(self.src_path)
 
             self.progress.emit(f"ℹ️ [Enrollment] Starting enrollment at {time.strftime('%H:%M:%S')}…", "info")
             self.progress.emit("   • Generating ephemeral key and hashing", "info")

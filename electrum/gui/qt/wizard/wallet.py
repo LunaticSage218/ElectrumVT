@@ -1,4 +1,5 @@
 from abc import ABC
+import hashlib
 import os
 import sys
 import threading
@@ -910,6 +911,7 @@ class WCVirtualTokenEncryptSeed(WalletWizardComponent):
         QApplication.processEvents()
 
         try:
+            # Step 1: Recover the CRP ephemeral key (l) from the VT enrollment
             from electrum.gui.qt.wizard.virtual_token_utils.retrieval_protocol import retrieval_protocol
             l_key = retrieval_protocol(
                 file_info=file_info,
@@ -922,27 +924,106 @@ class WCVirtualTokenEncryptSeed(WalletWizardComponent):
             if l_key is None:
                 raise RuntimeError('Failed to recover encryption key from virtual token.')
 
-            # Encrypt the seed phrase with AES-256-CBC using l_key
-            from Crypto.Cipher import AES
-            from Crypto.Util.Padding import pad
+            self.status_label.setText('Reconstructing enrolled file...')
+            QApplication.processEvents()
+
+            # Step 2: Decrypt the enrolled file to get the original file bytes
+            from electrum.gui.qt.wizard.virtual_token_utils.retrieval_utils import retrievalUtils
+            from electrum.gui.qt.wizard.virtual_token_utils.retrieval_protocol import retrieval_protocol as _rp
+            from electrum.gui.qt.wizard.virtual_token_utils.db_manager import SQLiteDBManager
+            from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import (
+                get_seed_filename, get_seed_nonces_filename, get_encrypted_filename,
+            )
             from bitarray import bitarray as _bitarray
 
-            key_bytes = l_key.tobytes() if isinstance(l_key, _bitarray) else l_key
-            if len(key_bytes) < 32:
-                raise ValueError('Recovered key too short for AES-256.')
-            key_bytes = key_bytes[:32]
+            vUtils = retrievalUtils()
 
-            cipher = AES.new(key_bytes, AES.MODE_CBC)
+            # Load the encrypted VT file from whichever storage backend was used
+            if file_storage == 'database':
+                import pickle, base64
+                kc_enc, kr_enc, hkey_enc = None, None, None
+                if keys_storage == 'usb':
+                    from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import get_keys_filename
+                    keys_fn = get_keys_filename(file_info.get('filename', ''), user_id, storage_pw)
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_usb(usb_path, storage_pw, keys_fn)
+                elif keys_storage == 'google_drive':
+                    keys_fid = file_info.get('keys_file_id', '')
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_google_drive(keys_fid, storage_pw)
+                elif keys_storage == 'database':
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_database(file_info, storage_pw)
+                kc, _, _ = vUtils.retrieve_encryption_keys(kc_enc, kr_enc, hkey_enc)
+                db = SQLiteDBManager()
+                uid = db.compute_unique_id(user_id, storage_pw, kc)
+                encrypted_file_bytes = db.fetch_encrypted_file(uid)
+            elif file_storage == 'usb':
+                enc_fn = get_encrypted_filename(file_info.get('filename', ''), user_id, storage_pw)
+                encrypted_file_bytes = vUtils.load_encrypted_file_from_usb(usb_path, enc_fn)
+            elif file_storage == 'google_drive':
+                enc_fid = file_info.get('encrypted_file_id', '')
+                encrypted_file_bytes = vUtils.load_encrypted_file_from_google_drive(enc_fid)
+            else:
+                raise ValueError(f'Unknown file_storage: {file_storage}')
+
+            if encrypted_file_bytes is None:
+                raise FileNotFoundError('Could not load the encrypted VT file.')
+
+            # Decrypt the file using the CRP key (l)
+            l_bytes = l_key.tobytes() if isinstance(l_key, _bitarray) else l_key
+            if len(l_bytes) < 32:
+                raise ValueError('Recovered CRP key too short for AES-256.')
+            l_bytes = l_bytes[:32]
+
+            from Crypto.Cipher import AES
+            from Crypto.Util.Padding import pad, unpad
+
+            file_iv = encrypted_file_bytes[:16]
+            file_ct = encrypted_file_bytes[16:]
+            file_cipher = AES.new(l_bytes, AES.MODE_CBC, file_iv)
+            decrypted_file = unpad(file_cipher.decrypt(file_ct), AES.block_size, style='pkcs7')
+
+            self.status_label.setText('Deriving seed encryption key from file...')
+            QApplication.processEvents()
+
+            # Step 3: Derive the seed encryption key via Gen-2 VT protocol
+            from electrum.gui.qt.wizard.virtual_token_utils.seed_key_protocol import generate_seed_key
+            ephemeral_key, rn1, rn2 = generate_seed_key(decrypted_file, storage_pw)
+
+            # Step 4: Encrypt the seed phrase with AES-256-CBC using the derived key
+            cipher = AES.new(ephemeral_key, AES.MODE_CBC)
             plaintext = seed.encode('utf-8')
             ciphertext = cipher.encrypt(pad(plaintext, AES.block_size, style='pkcs7'))
             encrypted_seed = cipher.iv + ciphertext
 
-            # Save to disk
-            from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import get_seed_filename
+            # Step 5: Save encrypted seed to disk
             seed_filename = get_seed_filename(user_id, storage_pw)
             seed_path = os.path.join(save_dir, seed_filename)
             with open(seed_path, 'wb') as f:
                 f.write(encrypted_seed)
+
+            # Step 6: Save RN1/RN2 nonces (encrypted with password-derived AES key)
+            import pickle
+            nonce_data = pickle.dumps({'rn1': rn1, 'rn2': rn2})
+            nonce_aes_key = hashlib.sha256(storage_pw.encode('utf-8')).digest()
+            nonce_cipher = AES.new(nonce_aes_key, AES.MODE_CBC)
+            padded_nonces = pad(nonce_data, AES.block_size, style='pkcs7')
+            nonce_ct = nonce_cipher.encrypt(padded_nonces)
+
+            nonces_filename = get_seed_nonces_filename(user_id, storage_pw)
+            nonces_path = os.path.join(save_dir, nonces_filename)
+            with open(nonces_path, 'wb') as f:
+                f.write(nonce_cipher.iv + nonce_ct)
+
+            # Step 7: Update file_info.json on USB with nonces filename
+            import json as _json
+            from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import get_file_info_name
+            fi_name = get_file_info_name(user_id, storage_pw)
+            fi_path = os.path.join(usb_path, fi_name)
+            if os.path.isfile(fi_path):
+                with open(fi_path, 'r', encoding='utf-8') as f:
+                    fi_data = _json.load(f)
+                fi_data['seed_nonces_filename'] = nonces_filename
+                with open(fi_path, 'w', encoding='utf-8') as f:
+                    _json.dump(fi_data, f, indent=4)
 
             self.status_label.setText('Seed encrypted and saved to: ' + seed_path)
             self.wizard_data['encrypted_seed_path'] = seed_path
@@ -1049,9 +1130,7 @@ class WCRetrieveSeedVirtualToken(WalletWizardComponent):
             # Derive USB directory from the location of file_info.json
             usb_dir = os.path.dirname(file_info_path)
 
-            # Step 1: recover the ephemeral key via the retrieval protocol
-            # (keys and encrypted VT file are located automatically using
-            #  hash-based filenames derived from filename + user_id + password)
+            # Step 1: recover the CRP ephemeral key (l) via the retrieval protocol
             from electrum.gui.qt.wizard.virtual_token_utils.retrieval_protocol import retrieval_protocol
             l_key = retrieval_protocol(
                 file_info=file_info,
@@ -1064,17 +1143,93 @@ class WCRetrieveSeedVirtualToken(WalletWizardComponent):
             if l_key is None:
                 raise RuntimeError('Failed to recover encryption key from virtual token.')
 
-            # Step 2: derive the encrypted seed file path and decrypt
+            self.result_label.setText('Reconstructing enrolled file...')
+            QApplication.processEvents()
+
+            # Step 2: Decrypt the enrolled VT file to recover the original file bytes
             from Crypto.Cipher import AES
             from Crypto.Util.Padding import unpad
             from bitarray import bitarray as _bitarray
-            from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import get_seed_filename
+            from electrum.gui.qt.wizard.virtual_token_utils.retrieval_utils import retrievalUtils
+            from electrum.gui.qt.wizard.virtual_token_utils.db_manager import SQLiteDBManager
+            from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import (
+                get_seed_filename, get_seed_nonces_filename, get_encrypted_filename,
+            )
 
-            key_bytes = l_key.tobytes() if isinstance(l_key, _bitarray) else l_key
-            if len(key_bytes) < 32:
-                raise ValueError('Recovered key too short for AES-256.')
-            key_bytes = key_bytes[:32]
+            vUtils = retrievalUtils()
 
+            # Load the encrypted VT file from whichever storage backend was used
+            if file_storage == 'database':
+                import pickle, base64
+                kc_enc, kr_enc, hkey_enc = None, None, None
+                if keys_storage == 'usb':
+                    from electrum.gui.qt.wizard.virtual_token_utils.hash_utils import get_keys_filename
+                    keys_fn = get_keys_filename(file_info.get('filename', ''), user_id, password)
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_usb(usb_dir, password, keys_fn)
+                elif keys_storage == 'google_drive':
+                    keys_fid = file_info.get('keys_file_id', '')
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_google_drive(keys_fid, password)
+                elif keys_storage == 'database':
+                    kc_enc, kr_enc, hkey_enc = vUtils.load_keys_from_database(file_info, password)
+                kc, _, _ = vUtils.retrieve_encryption_keys(kc_enc, kr_enc, hkey_enc)
+                db = SQLiteDBManager()
+                uid = db.compute_unique_id(user_id, password, kc)
+                encrypted_file_bytes = db.fetch_encrypted_file(uid)
+            elif file_storage == 'usb':
+                enc_fn = get_encrypted_filename(file_info.get('filename', ''), user_id, password)
+                encrypted_file_bytes = vUtils.load_encrypted_file_from_usb(usb_dir, enc_fn)
+            elif file_storage == 'google_drive':
+                enc_fid = file_info.get('encrypted_file_id', '')
+                encrypted_file_bytes = vUtils.load_encrypted_file_from_google_drive(enc_fid)
+            else:
+                raise ValueError(f'Unknown file_storage: {file_storage}')
+
+            if encrypted_file_bytes is None:
+                raise FileNotFoundError('Could not load the encrypted VT file.')
+
+            # Decrypt with the CRP key (l)
+            l_bytes = l_key.tobytes() if isinstance(l_key, _bitarray) else l_key
+            if len(l_bytes) < 32:
+                raise ValueError('Recovered CRP key too short for AES-256.')
+            l_bytes = l_bytes[:32]
+
+            file_iv = encrypted_file_bytes[:16]
+            file_ct = encrypted_file_bytes[16:]
+            file_cipher = AES.new(l_bytes, AES.MODE_CBC, file_iv)
+            decrypted_file = unpad(file_cipher.decrypt(file_ct), AES.block_size, style='pkcs7')
+
+            self.result_label.setText('Recovering seed encryption key from file...')
+            QApplication.processEvents()
+
+            # Step 3: Load stored RN1/RN2 nonces from USB
+            import pickle
+            nonces_filename = file_info.get('seed_nonces_filename')
+            if not nonces_filename:
+                nonces_filename = get_seed_nonces_filename(user_id, password)
+            nonces_path = os.path.join(usb_dir, nonces_filename)
+
+            if not os.path.isfile(nonces_path):
+                raise FileNotFoundError(
+                    f'Seed nonces file not found at expected location:\n{nonces_path}'
+                )
+
+            with open(nonces_path, 'rb') as f:
+                nonce_blob = f.read()
+
+            nonce_iv = nonce_blob[:16]
+            nonce_ct = nonce_blob[16:]
+            nonce_aes_key = hashlib.sha256(password.encode('utf-8')).digest()
+            nonce_cipher = AES.new(nonce_aes_key, AES.MODE_CBC, nonce_iv)
+            nonce_serialized = unpad(nonce_cipher.decrypt(nonce_ct), AES.block_size, style='pkcs7')
+            nonce_data = pickle.loads(nonce_serialized)
+            rn1 = nonce_data['rn1']
+            rn2 = nonce_data['rn2']
+
+            # Step 4: Re-derive the seed encryption key via Gen-2 VT protocol
+            from electrum.gui.qt.wizard.virtual_token_utils.seed_key_protocol import recover_seed_key
+            ephemeral_key = recover_seed_key(decrypted_file, password, rn1, rn2)
+
+            # Step 5: Decrypt the seed phrase
             seed_filename = get_seed_filename(user_id, password)
             seed_file_path = os.path.join(usb_dir, seed_filename)
 
@@ -1091,7 +1246,7 @@ class WCRetrieveSeedVirtualToken(WalletWizardComponent):
 
             iv = encrypted_seed[:16]
             ciphertext = encrypted_seed[16:]
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
+            cipher = AES.new(ephemeral_key, AES.MODE_CBC, iv)
             plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size, style='pkcs7')
             seed_phrase = plaintext.decode('utf-8')
 

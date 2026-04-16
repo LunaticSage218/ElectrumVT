@@ -21,6 +21,7 @@ dnspython>=2.2,<2.5
 
 # LARRY: My packages for virtual token
 bitarray
+numpy
 oracledb
 google-auth
 google-auth-oauthlib
